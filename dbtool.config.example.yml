@@ -1,0 +1,18 @@
+default_env: dev
+
+environments:
+  dev:
+    host: localhost
+    port: 3307
+    database: maxlove_db
+    user: root
+    password: Password1
+    allow_destructive: true
+
+  prod:
+    host: prod-db.example.com
+    port: 3307
+    database: root
+    user: authguard_user
+    password: Password2
+    allow_destructive: false

@@ -1,0 +1,15 @@
+# dbtool.bootstrap.yml  – service catalogue (extended with *path*)
+
+services:
+  maxlove:
+    database: maxlove_db
+    user:     maxlove_user
+    password: Password1
+    privileges: ALL
+    path: ~/dev/madmaxbot/madmaxbot-svc-lovemax/db/schema.sql
+
+  auth:
+    database: authguard_db
+    user:     authguard_user
+    password: Password2
+    privileges: ALL
