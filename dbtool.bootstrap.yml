@@ -1,15 +1,22 @@
-# dbtool.bootstrap.yml  – service catalogue (extended with *path*)
+# ---------------------------------------------------------------------------
+# dbtool.bootstrap.yml   – service catalogue
+#
+# * The optional `path:` must be a DIRECTORY, not an individual .sql file.
+#   dbtool will create `db/migrations/` and `db/schema/` inside it when needed.
+# ---------------------------------------------------------------------------
 
 services:
   maxlove:
     database: maxlove_db
-    user:     maxlove_user
+    user:     root
     password: Password1
     privileges: ALL
-    path: ~/dev/madmaxbot/madmaxbot-svc-lovemax/db/schema.sql
+    # path: ~/dev/madmaxbot/madmaxbot-svc-lovemax/db/
 
   auth:
     database: authguard_db
     user:     authguard_user
     password: Password2
     privileges: ALL
+    # default layout will be used unless you uncomment the line below
+    # path: backend/auth-service
