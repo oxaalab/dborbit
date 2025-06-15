@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maria-schema-migrate"
+version = "0.1.0"
+description = "Hybrid incremental & declarative migration tool for MariaDB"
+authors = [{name = "Your Name", email = "you@example.com"}]
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+    "click>=8.1",
+    "PyYAML>=6.0",
+    "mysql-connector-python>=8.1",
+    "sqlparse>=0.4",
+]
+
+[project.scripts]
+dbtool = "dbtool.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

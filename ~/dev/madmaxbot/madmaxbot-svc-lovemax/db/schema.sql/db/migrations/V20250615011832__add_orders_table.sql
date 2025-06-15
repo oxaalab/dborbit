@@ -1,0 +1,1 @@
+-- !!! would execute `DROP TABLE `schema_migrations`;` (destructive);
