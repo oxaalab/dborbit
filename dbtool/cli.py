@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-dbtool CLI – multi‑service‑aware with optional custom *path* per service.
+dbtool – multi‑service‑aware CLI.
 
-Layout reference
-────────────────
-* default layout      → services/<service>/db/{migrations,schema}
-* custom layout via   → path: <dir>    (in dbtool.bootstrap.yml)
+• Default layout:        services/<service>/db/{migrations,schema}/  
+• Monolithic schema:     services/<service>/db/schema.sql  
+• Custom root directory: declare `path:` in dbtool.bootstrap.yml
+
+The tool now gracefully falls back to the project‑root *db/* directory when
+the requested service directory does not yet exist but a valid *db/schema*
+(or *db/schema.sql*) is present.  This makes first‑run onboarding painless.
 """
 from __future__ import annotations
 
@@ -24,10 +27,6 @@ from dbtool.migrations.runner import MigrationRunner
 from dbtool.schema.apply import apply_schema
 from dbtool.schema.diff import diff as schema_diff
 
-# --------------------------------------------------------------------------- #
-#  Constants / helpers                                                        #
-# --------------------------------------------------------------------------- #
-
 PROJECT_ROOT = pathlib.Path.cwd()
 DEFAULT_BOOTSTRAP_FILE = PROJECT_ROOT / "dbtool.bootstrap.yml"
 
@@ -41,14 +40,11 @@ def _service_meta(service: str, bootstrap_file: pathlib.Path) -> dict[str, t.Any
     try:
         return data["services"][service]
     except KeyError:
-        click.echo(
-            f"Service {service!r} not found in {bootstrap_file}", err=True
-        )
+        click.echo(f"Service {service!r} not found in {bootstrap_file}", err=True)
         sys.exit(1)
 
 
 def _load_env(ctx, _param, value) -> Environment:
-    """Server‑level (host/port/root) environment."""
     try:
         return load(ctx.obj["config_path"], value)
     except ConfigError as exc:
@@ -57,75 +53,85 @@ def _load_env(ctx, _param, value) -> Environment:
 
 
 def _build_service_env(
-    base_env: Environment,
+    base: Environment,
     service: str | None,
-    bootstrap_file: pathlib.Path = DEFAULT_BOOTSTRAP_FILE,
+    bootstrap_file: pathlib.Path,
 ) -> Environment:
-    """Merge server creds with service DB/user creds."""
     if service is None:
-        return base_env
-
+        return base
     meta = _service_meta(service, bootstrap_file)
-    merged: dict[str, t.Any] = {
-        "host": base_env.host,
-        "port": base_env.port,
+    merged = {
+        "host": base.host,
+        "port": base.port,
         "database": meta["database"],
         "user": meta["user"],
         "password": meta["password"],
-        "allow_destructive": base_env.allow_destructive,
+        "allow_destructive": base.allow_destructive,
     }
     return Environment(service, merged)
 
 
-def _service_dir(service: str | None, bootstrap_file: pathlib.Path = DEFAULT_BOOTSTRAP_FILE) -> pathlib.Path:
+def _resolve_service_root(
+    service: str | None,
+    bootstrap_file: pathlib.Path,
+) -> pathlib.Path:
     """
-    Return service root directory (may be overridden by *path:*).
+    Determine the root directory that holds *all* DB artefacts for *service*.
+
+    Fallback logic:
+
+    1. `path:` (if provided in bootstrap)          → absolute / relative dir
+    2. services/<service>/                         → default convention
+    3. project‑root *db/* directories *when* they already exist
+       (facilitates adopting dbtool in an existing mono‑repo)
     """
     if service is None:
-        root = PROJECT_ROOT
-    else:
-        meta = _service_meta(service, bootstrap_file)
-        if "path" in meta:
-            root = PROJECT_ROOT / meta["path"] if not pathlib.Path(meta["path"]).is_absolute() else pathlib.Path(meta["path"])
-        else:
-            root = PROJECT_ROOT / "services" / service
+        return PROJECT_ROOT
 
-    # ensure sub‑folders exist
+    meta = _service_meta(service, bootstrap_file)
+
+    if "path" in meta:
+        root = pathlib.Path(meta["path"]).expanduser()
+        if root.is_file():
+            click.echo(f"`path:` for {service!r} must be a directory, got a file.", err=True)
+            sys.exit(1)
+        if not root.is_absolute():
+            root = PROJECT_ROOT / root
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    conv_root = PROJECT_ROOT / "services" / service
+    if conv_root.exists():
+        return conv_root
+
+    legacy_db = PROJECT_ROOT / "db"
+    if (legacy_db / "schema").exists() or (legacy_db / "schema.sql").exists():
+        return PROJECT_ROOT
+
+    conv_root.mkdir(parents=True, exist_ok=True)
+    return conv_root
+
+
+def _ensure_subdirs(root: pathlib.Path) -> None:
     (root / "db" / "migrations").mkdir(parents=True, exist_ok=True)
-    (root / "db" / "schema").mkdir(parents=True, exist_ok=True)
-    return root
+    schema_sql = root / "db" / "schema.sql"
+    if not schema_sql.exists():
+        (root / "db" / "schema").mkdir(parents=True, exist_ok=True)
 
-
-# --------------------------------------------------------------------------- #
-#  CLI root                                                                   #
-# --------------------------------------------------------------------------- #
 
 @click.group()
 @click.option(
-    "-c", "--config", "config_path",
-    type=click.Path(),
-    default=None,
-    help="Path to env‑config YAML",
+    "-c", "--config", "config_path", type=click.Path(), help="env config YAML"
 )
 @click.pass_context
 def main(ctx, config_path):
-    """dbtool – hybrid migration & DDL manager for MariaDB (multi‑service‑ready)."""
     ctx.obj = {"config_path": pathlib.Path(config_path) if config_path else None}
 
 
-# --------------------------------------------------------------------------- #
-#  Info                                                                       #
-# --------------------------------------------------------------------------- #
-
 @main.command()
 def version():
-    """Print dbtool version."""
     click.echo(__version__)
 
-
-# --------------------------------------------------------------------------- #
-#  Bootstrap                                                                  #
-# --------------------------------------------------------------------------- #
 
 @main.command("bootstrap")
 @click.option("-e", "--env", callback=_load_env, expose_value=True)
@@ -133,150 +139,97 @@ def version():
     "-f", "--file", "bootstrap_file",
     type=click.Path(exists=True, dir_okay=False),
     default=str(DEFAULT_BOOTSTRAP_FILE),
-    help="YAML file describing service DB profiles (defaults to dbtool.bootstrap.yml).",
 )
-@click.option("--dry-run", is_flag=True, help="Show SQL only.")
-@click.pass_context
-def _bootstrap(ctx, env, bootstrap_file, dry_run):
-    """Create databases/users/GRANTs for one or many micro‑services."""
+@click.option("--dry-run", is_flag=True)
+def bootstrap_cmd(env, bootstrap_file, dry_run):
     bootstrap(env, pathlib.Path(bootstrap_file), dry_run=dry_run)
 
 
-# --------------------------------------------------------------------------- #
-#  Status                                                                     #
-# --------------------------------------------------------------------------- #
+def _common_opts(fn):
+    opts = [
+        click.option("-e", "--env", callback=_load_env, expose_value=True),
+        click.option("-s", "--service"),
+        click.option(
+            "-f", "--file", "bootstrap_file",
+            type=click.Path(), default=str(DEFAULT_BOOTSTRAP_FILE)
+        ),
+    ]
+    for opt in reversed(opts):
+        fn = opt(fn)
+    return fn
+
 
 @main.command()
-@click.option("-e", "--env",  callback=_load_env, is_eager=True, expose_value=True)
-@click.option("-s", "--service", help="Micro‑service name.")
-@click.option(
-    "-f", "--file", "bootstrap_file",
-    type=click.Path(),
-    default=str(DEFAULT_BOOTSTRAP_FILE),
-    help="Bootstrap file (only needed when using --service).",
-)
-@click.pass_context
-def status(ctx, env, service, bootstrap_file):
-    """Show migration status."""
-    env = _build_service_env(env, service, pathlib.Path(bootstrap_file))
-    srv_dir = _service_dir(service, pathlib.Path(bootstrap_file))
-
-    runner = MigrationRunner(env, srv_dir)
+@_common_opts
+def status(env, service, bootstrap_file):
+    root = _resolve_service_root(service, pathlib.Path(bootstrap_file))
+    _ensure_subdirs(root)
+    runner = MigrationRunner(_build_service_env(env, service, pathlib.Path(bootstrap_file)), root)
     st = runner.status()
-    click.echo(
-        f"Applied: {len(st['applied'])} | Pending: {len(st['pending'])} "
-        f"| Checksum mismatches: {len(st['mismatch'])}"
-    )
-    for p in st["pending"]:
-        click.echo(f"  PENDING  {p.path.name}")
-    for mf, dbsum in st["mismatch"]:
-        click.echo(f"  MISMATCH {mf.path.name} (db:{dbsum[:8]}  file:{mf.checksum[:8]})")
+    click.echo(f"Applied {len(st['applied'])}  |  Pending {len(st['pending'])}")
+    for mf in st["pending"]:
+        click.echo(f"  PENDING  {mf.path.name}")
 
-
-# --------------------------------------------------------------------------- #
-#  Migrate                                                                    #
-# --------------------------------------------------------------------------- #
 
 @main.command()
-@click.option("-e", "--env",  callback=_load_env, expose_value=True)
-@click.option("-s", "--service", help="Micro‑service name.")
-@click.option(
-    "-f", "--file", "bootstrap_file",
-    type=click.Path(),
-    default=str(DEFAULT_BOOTSTRAP_FILE),
-    help="Bootstrap file (only needed when using --service).",
-)
+@_common_opts
 @click.option("--dry-run", is_flag=True)
 @click.option("--allow-destructive", is_flag=True)
-@click.pass_context
-def migrate(ctx, env, service, bootstrap_file, dry_run, allow_destructive):
-    """Apply pending incremental migrations."""
-    env = _build_service_env(env, service, pathlib.Path(bootstrap_file))
-    srv_dir = _service_dir(service, pathlib.Path(bootstrap_file))
-
-    MigrationRunner(env, srv_dir).migrate(
+def migrate(env, service, bootstrap_file, dry_run, allow_destructive):
+    root = _resolve_service_root(service, pathlib.Path(bootstrap_file))
+    _ensure_subdirs(root)
+    MigrationRunner(_build_service_env(env, service, pathlib.Path(bootstrap_file)), root).migrate(
         dry_run=dry_run,
         allow_destructive=allow_destructive,
     )
 
 
-# --------------------------------------------------------------------------- #
-#  Declarative schema                                                         #
-# --------------------------------------------------------------------------- #
-
 @main.command("schema-diff")
-@click.option("-e", "--env",  callback=_load_env, expose_value=True)
-@click.option("-s", "--service", help="Micro‑service name.")
-@click.option(
-    "-f", "--file", "bootstrap_file",
-    type=click.Path(),
-    default=str(DEFAULT_BOOTSTRAP_FILE),
-)
+@_common_opts
 @click.option("--allow-destructive", is_flag=True)
-@click.pass_context
-def _schema_diff(ctx, env, service, bootstrap_file, allow_destructive):
-    """Show SQL required so DB matches schema directory on disk."""
-    env = _build_service_env(env, service, pathlib.Path(bootstrap_file))
-    srv_dir = _service_dir(service, pathlib.Path(bootstrap_file))
-    schema_dir = srv_dir / "db" / "schema"
-
-    stmts = schema_diff(env, schema_dir, allow_destructive=allow_destructive)
+def schema_diff_cmd(env, service, bootstrap_file, allow_destructive):
+    root = _resolve_service_root(service, pathlib.Path(bootstrap_file))
+    _ensure_subdirs(root)
+    schema_root = root / "db" / "schema"
+    stmts = schema_diff(
+        _build_service_env(env, service, pathlib.Path(bootstrap_file)),
+        schema_root,
+        allow_destructive=allow_destructive,
+    )
     click.echo("\n".join(stmts) if stmts else "No differences.")
 
 
 @main.command("schema-apply")
-@click.option("-e", "--env",  callback=_load_env, expose_value=True)
-@click.option("-s", "--service", help="Micro‑service name.")
-@click.option(
-    "-f", "--file", "bootstrap_file",
-    type=click.Path(),
-    default=str(DEFAULT_BOOTSTRAP_FILE),
-)
+@_common_opts
 @click.option("--auto-approve", is_flag=True)
 @click.option("--allow-destructive", is_flag=True)
 @click.option("--dry-run", is_flag=True)
-@click.pass_context
-def _schema_apply(ctx, env, service, bootstrap_file, auto_approve, allow_destructive, dry_run):
-    """Apply declarative schema directory."""
-    env = _build_service_env(env, service, pathlib.Path(bootstrap_file))
-    srv_dir = _service_dir(service, pathlib.Path(bootstrap_file))
-
+def schema_apply_cmd(env, service, bootstrap_file, auto_approve, allow_destructive, dry_run):
+    root = _resolve_service_root(service, pathlib.Path(bootstrap_file))
+    _ensure_subdirs(root)
     apply_schema(
-        env,
-        srv_dir,
+        _build_service_env(env, service, pathlib.Path(bootstrap_file)),
+        root,
         auto_approve=auto_approve,
         allow_destructive=allow_destructive,
         dry_run=dry_run,
     )
 
 
-# --------------------------------------------------------------------------- #
-#  Generate                                                                   #
-# --------------------------------------------------------------------------- #
-
 @main.command("generate")
-@click.option("-e", "--env",  callback=_load_env, expose_value=True)
-@click.option("-s", "--service", help="Micro‑service name.")
-@click.option(
-    "-f", "--file", "bootstrap_file",
-    type=click.Path(),
-    default=str(DEFAULT_BOOTSTRAP_FILE),
-)
+@_common_opts
 @click.option("-m", "--message", required=True)
 @click.option("--allow-destructive", is_flag=True)
-@click.pass_context
-def generate_migration(ctx, env, service, bootstrap_file, message, allow_destructive):
-    """Create a new migration from schema diff."""
-    env = _build_service_env(env, service, pathlib.Path(bootstrap_file))
-    srv_dir = _service_dir(service, pathlib.Path(bootstrap_file))
-
+def generate_cmd(env, service, bootstrap_file, message, allow_destructive):
+    root = _resolve_service_root(service, pathlib.Path(bootstrap_file))
+    _ensure_subdirs(root)
     path = generate(
-        env,
-        srv_dir,
+        _build_service_env(env, service, pathlib.Path(bootstrap_file)),
+        root,
         description=message,
         allow_destructive=allow_destructive,
     )
     if path:
-        click.echo(f"Created {path.relative_to(srv_dir)}")
+        click.echo(f"Created {path.relative_to(root)}")
     else:
         click.echo("Database already matches schema – nothing to generate.")

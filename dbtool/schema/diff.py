@@ -1,30 +1,66 @@
 from __future__ import annotations
-import pathlib, sqlparse, difflib
+
+import difflib
+import pathlib
+import sqlparse
+
+from dbtool.constants import SCHEMA_HISTORY_TABLE
 from dbtool.driver import connection
 from dbtool.config import Environment
 from dbtool.utils import split_sql
 
+IGNORED_TABLES = {SCHEMA_HISTORY_TABLE}
+
 
 def _current_schema(cur) -> dict[str, str]:
+    """Return the current DB schema as {table_name: DDL‑text}."""
     cur.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
-    tables = [row[0] for row in cur.fetchall()]
-    ddl = {}
+    tables = [r[0] for r in cur.fetchall() if r[0] not in IGNORED_TABLES]
+    ddl: dict[str, str] = {}
     for t in tables:
         cur.execute(f"SHOW CREATE TABLE `{t}`")
         ddl[t] = cur.fetchone()[1] + ";"
     return ddl
 
 
-def _desired_schema(schema_dir: pathlib.Path) -> dict[str, str]:
-    ddl: dict[str, str] = {}
-    for p in schema_dir.glob("**/*.sql"):
-        sql = p.read_text(encoding="utf-8")
-        tokens = sqlparse.parse(sql)
-        if not tokens:
+def _collect_from_sql(sql_text: str, ddl: dict[str, str]) -> None:
+    """
+    Populate *ddl* mapping with CREATE‑TABLE statements found in *sql_text*.
+    """
+    for stmt in split_sql(sql_text):
+        parsed = sqlparse.parse(stmt)
+        if not parsed:
             continue
-        ident = tokens[0].get_name()
-        if ident:
-            ddl[ident] = sql.rstrip(";") + ";"
+        ident = parsed[0].get_name()
+        if ident and ident not in IGNORED_TABLES:
+            ddl[ident] = stmt.rstrip(";") + ";"
+
+
+def _desired_schema(schema_path: pathlib.Path) -> dict[str, str]:
+    """
+    Build the “desired” schema mapping.
+
+    • If *schema_path* is a **directory** ⇒ read every *.sql* file inside it.  
+    • If it is a **file**               ⇒ parse that file.  
+    • If the directory does **not** exist but a sibling ``schema.sql`` file
+      does, that file is used transparently.
+
+    Returns {table_name: DDL‑text}.
+    """
+    ddl: dict[str, str] = {}
+
+    if not schema_path.exists():
+        fallback = schema_path.with_suffix(".sql")
+        if fallback.exists():
+            schema_path = fallback
+
+    if schema_path.is_file():
+        _collect_from_sql(schema_path.read_text(encoding="utf-8"), ddl)
+        return ddl
+
+    if schema_path.is_dir():
+        for file in schema_path.glob("**/*.sql"):
+            _collect_from_sql(file.read_text(encoding="utf-8"), ddl)
     return ddl
 
 
@@ -35,8 +71,8 @@ def diff(
     allow_destructive: bool = False,
 ) -> list[str]:
     """
-    Return a list of SQL statements (strings) that would bring *env*
-    into alignment with *schema_dir*.
+    Return SQL statements that transform *env* so it matches the files in
+    *schema_dir* (or a neighbouring *schema.sql*).
     """
     with connection(env) as conn, conn.cursor() as cur:
         current = _current_schema(cur)
@@ -54,19 +90,17 @@ def diff(
         else:
             sql_changes.append(f"-- !!! would execute `{drop_stmt}` (destructive)")
 
-    common = desired.keys() & current.keys()
-    for tbl in common:
+    for tbl in desired.keys() & current.keys():
         if desired[tbl].strip() != current[tbl].strip():
             sql_changes.append(f"-- diff for table `{tbl}`")
-            diff_lines = difflib.unified_diff(
+            for l in difflib.unified_diff(
                 current[tbl].splitlines(),
                 desired[tbl].splitlines(),
                 fromfile="current",
                 tofile="desired",
                 lineterm="",
-            )
-            for l in diff_lines:
-                sql_changes.append("-- " + l)
+            ):
+                sql_changes.append(f"-- {l}")
             sql_changes.append(f"-- manual ALTER required for `{tbl}`")
 
     return sql_changes
