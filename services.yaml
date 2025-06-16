@@ -1,0 +1,20 @@
+services:
+  maxlove:
+    database: maxlove_db
+    user: maxlove_user
+    password: Password1
+    privileges: ALL
+    path: ~/dev/madmaxbot/madmaxbot-svc-lovemax/db/latest.sql
+
+  auth:
+    database: authguard_db
+    user: authguard_user
+    password: Password2
+    privileges: ALL
+    # path: /absolute/or/relative/path/to/auth/schema.sql
+
+  securemax:
+    database: securemax_db
+    user: securemax_user
+    password: Password2
+    privileges: ALL
