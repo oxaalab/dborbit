@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-bootstrap-mariadb = "bootstrap_mariadb:cli"
+bootstrap-mariadb = "dborbit.cli:cli"
 
 [project.optional-dependencies]
 dev = [
